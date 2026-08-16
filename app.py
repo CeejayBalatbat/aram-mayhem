@@ -61,7 +61,6 @@ def spell_selection_ui(col, spell_id, spells):
             st.markdown(f"**{selected_spell.get('name', 'Unknown Spell')}**")
             
             # --- CDRAGON PARSING LOGIC ---
-            # Check if CDragon explicitly lists an "ammo" block for this spell
             ammo_data = selected_spell.get('ammo', {})
             has_charges = ammo_data is not None and 'ammoRechargeTime' in ammo_data and len(ammo_data['ammoRechargeTime']) > 0
             
@@ -73,18 +72,21 @@ def spell_selection_ui(col, spell_id, spells):
                 cd_array = selected_spell.get('cooldownCoefficients', [10.0])
                 max_charges_array = [1]
             
-            # Allow user to select the rank of the spell
-            # Filter out any 0s from the array (CDragon sometimes pads arrays to 6 levels)
             valid_ranks = [cd for cd in cd_array if cd > 0]
             if not valid_ranks:
                 valid_ranks = [10.0] # Fallback
                 
-            rank_index = st.slider(f"Skill Rank", min_value=1, max_value=len(valid_ranks), value=1, key=f"rank_{spell_id}") - 1
+            # THE FIX: Only render a slider if there are multiple ranks
+            if len(valid_ranks) > 1:
+                rank_index = st.slider(f"Skill Rank", min_value=1, max_value=len(valid_ranks), value=1, key=f"rank_{spell_id}") - 1
+            else:
+                rank_index = 0
+                st.info("Skill only has 1 rank.")
             
             # Extract the correct Base CD / Recharge Time
             base_cd = float(valid_ranks[rank_index])
             
-            # Extract the correct number of charges for that rank (if applicable)
+            # Extract the correct number of charges for that rank
             valid_max_charges = [c for c in max_charges_array if c > 0]
             if not valid_max_charges:
                 valid_max_charges = [1]
