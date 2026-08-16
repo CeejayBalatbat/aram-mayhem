@@ -4,7 +4,7 @@ import requests
 st.set_page_config(page_title="Archmage 0-CD Tester", layout="wide")
 
 # --- DATA FETCHING (RIOT DATA DRAGON) ---
-@st.cache_data(ttl=86400) # Cache for 24 hours to avoid spamming the API
+@st.cache_data(ttl=86400) 
 def get_latest_version():
     res = requests.get("https://ddragon.leagueoflegends.com/api/versions.json")
     return res.json()[0] if res.status_code == 200 else "13.24.1"
@@ -38,15 +38,19 @@ champions = get_champion_list(version)
 st.title("Archmage 0-CD Alternating Tester")
 st.markdown(f"*Using live data from LoL Patch {version}*")
 
+# --- GLOBAL CHAMPION SELECTION ---
+st.subheader("Champion Selection")
+selected_champ = st.selectbox("Select Champion", options=champions)
+champ_spells = get_champion_spells(version, selected_champ)
+
+st.divider()
+
 # --- UI LAYOUT ---
 col1, col2 = st.columns(2)
 
-def spell_selection_ui(col, spell_id):
+def spell_selection_ui(col, spell_id, spells):
     with col:
         st.subheader(f"Spell {spell_id}")
-        
-        champ = st.selectbox(f"Select Champion {spell_id}", options=champions, key=f"champ_{spell_id}")
-        spells = get_champion_spells(version, champ)
         
         if spells:
             spell_key = st.selectbox(f"Select Skill {spell_id}", options=["Q", "W", "E", "R"], key=f"skill_key_{spell_id}")
@@ -72,8 +76,9 @@ def spell_selection_ui(col, spell_id):
         
         return base_cd, spec_ah
 
-s1_base_cd, s1_spec_ah = spell_selection_ui(col1, "1")
-s2_base_cd, s2_spec_ah = spell_selection_ui(col2, "2")
+# Pass the globally fetched spells down into the column UI
+s1_base_cd, s1_spec_ah = spell_selection_ui(col1, "1", champ_spells)
+s2_base_cd, s2_spec_ah = spell_selection_ui(col2, "2", champ_spells)
 
 st.divider()
 
