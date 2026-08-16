@@ -1,23 +1,79 @@
 import streamlit as st
+import requests
 
-# Configure the page layout
-st.set_page_config(page_title="Archmage 0-CD Tester", layout="centered")
+st.set_page_config(page_title="Archmage 0-CD Tester", layout="wide")
+
+# --- DATA FETCHING (RIOT DATA DRAGON) ---
+@st.cache_data(ttl=86400) # Cache for 24 hours to avoid spamming the API
+def get_latest_version():
+    res = requests.get("https://ddragon.leagueoflegends.com/api/versions.json")
+    return res.json()[0] if res.status_code == 200 else "13.24.1"
+
+@st.cache_data(ttl=86400)
+def get_champion_list(version):
+    res = requests.get(f"https://ddragon.leagueoflegends.com/cdn/{version}/data/en_US/champion.json")
+    if res.status_code == 200:
+        return list(res.json()['data'].keys())
+    return []
+
+@st.cache_data(ttl=86400)
+def get_champion_spells(version, champ_name):
+    res = requests.get(f"https://ddragon.leagueoflegends.com/cdn/{version}/data/en_US/champion/{champ_name}.json")
+    if res.status_code == 200:
+        champ_data = res.json()['data'][champ_name]
+        # Map Q, W, E, R to the spells
+        spells = champ_data['spells']
+        spell_mapping = {
+            "Q": spells[0],
+            "W": spells[1],
+            "E": spells[2],
+            "R": spells[3]
+        }
+        return spell_mapping
+    return {}
+
+version = get_latest_version()
+champions = get_champion_list(version)
 
 st.title("Archmage 0-CD Alternating Tester")
-st.markdown("Test if your spell loop can achieve a mathematical 0-second cooldown.")
+st.markdown(f"*Using live data from LoL Patch {version}*")
 
-# Use columns to lay out the inputs cleanly
+# --- UI LAYOUT ---
 col1, col2 = st.columns(2)
 
-with col1:
-    st.subheader("Spell 1")
-    s1_base_cd = st.number_input("S1 Base CD (s):", min_value=0.0, max_value=200.0, value=80.0, step=0.5)
-    s1_spec_ah = st.number_input("S1 Specific AH:", min_value=0.0, max_value=200.0, value=40.0, step=1.0)
+def spell_selection_ui(col, spell_id):
+    with col:
+        st.subheader(f"Spell {spell_id}")
+        
+        champ = st.selectbox(f"Select Champion {spell_id}", options=champions, key=f"champ_{spell_id}")
+        spells = get_champion_spells(version, champ)
+        
+        if spells:
+            spell_key = st.selectbox(f"Select Skill {spell_id}", options=["Q", "W", "E", "R"], key=f"skill_key_{spell_id}")
+            selected_spell = spells[spell_key]
+            st.markdown(f"**{selected_spell['name']}**")
+            
+            # Allow user to select the rank of the spell to get the correct base CD
+            rank_index = st.slider(f"Skill Rank", min_value=1, max_value=len(selected_spell['cooldown']), value=1, key=f"rank_{spell_id}") - 1
+            fetched_cd = selected_spell['cooldown'][rank_index]
+        else:
+            fetched_cd = 10.0
+            st.error("Failed to load champion data.")
 
-with col2:
-    st.subheader("Spell 2")
-    s2_base_cd = st.number_input("S2 Base CD (s):", min_value=0.0, max_value=200.0, value=50.0, step=0.5)
-    s2_spec_ah = st.number_input("S2 Specific AH:", min_value=0.0, max_value=200.0, value=0.0, step=1.0)
+        # Allow manual override for Edge Cases (like Ammo recharge times that DDragon hides in effect arrays)
+        st.markdown("---")
+        has_charges = st.checkbox(f"Uses Charges / Ammo?", key=f"charges_{spell_id}")
+        
+        if has_charges:
+            st.info("For charge-based spells, Archmage uses the Ammo Recharge Time as the Base CD.")
+            
+        base_cd = st.number_input(f"Base CD / Recharge Time (s)", min_value=0.0, max_value=200.0, value=float(fetched_cd), step=0.5, key=f"cd_{spell_id}")
+        spec_ah = st.number_input(f"Specific AH", min_value=0.0, max_value=200.0, value=0.0, step=1.0, key=f"ah_{spell_id}")
+        
+        return base_cd, spec_ah
+
+s1_base_cd, s1_spec_ah = spell_selection_ui(col1, "1")
+s2_base_cd, s2_spec_ah = spell_selection_ui(col2, "2")
 
 st.divider()
 
@@ -26,44 +82,36 @@ gen_ah = st.slider("General Ability Haste:", min_value=0.0, max_value=500.0, val
 purist = st.checkbox("Purist-Caster (10% Total CD Reduction)")
 
 # --- CORE MATH LOGIC ---
-
-# Archmage refund uses the CURRENT Base CD
 s1_refund = s1_base_cd * 0.30
 s2_refund = s2_base_cd * 0.30
 
-# Purist-Caster 10% reduction modifier
 cd_modifier = 0.90 if purist else 1.0
 
-# Total Ability Haste per spell
 total_ah_s1 = gen_ah + s1_spec_ah
 total_ah_s2 = gen_ah + s2_spec_ah
 
-# Effective cooldown uses the CURRENT Base CD
 s1_cd = s1_base_cd * (100 / (100 + total_ah_s1)) * cd_modifier
 s2_cd = s2_base_cd * (100 / (100 + total_ah_s2)) * cd_modifier
 
-# Required TOTAL AH for each spell to be completely refunded
 ah_mult = 90 if purist else 100
 
 s1_req_total_ah = (ah_mult * s1_base_cd / s2_refund) - 100 if s2_refund > 0 else float('inf')
 s2_req_total_ah = (ah_mult * s2_base_cd / s1_refund) - 100 if s1_refund > 0 else float('inf')
 
-# Required GENERAL AH
 s1_req_gen = s1_req_total_ah - s1_spec_ah if s1_req_total_ah != float('inf') else float('inf')
 s2_req_gen = s2_req_total_ah - s2_spec_ah if s2_req_total_ah != float('inf') else float('inf')
 
 required_general_ah = max(s1_req_gen, s2_req_gen, 0)
 
 # --- OUTPUT RENDERING ---
-
 st.divider()
 st.header("Results")
 
 st.markdown(f"**Archmage refund from S1 → S2:** `{s1_refund:.2f}s`")
 st.markdown(f"**Archmage refund from S2 → S1:** `{s2_refund:.2f}s`")
 
-st.markdown(f"**S1 In-Game CD:** `{s1_cd:.2f}s` *(Using {s1_base_cd}s Base CD & {total_ah_s1:.0f} Total AH)*")
-st.markdown(f"**S2 In-Game CD:** `{s2_cd:.2f}s` *(Using {s2_base_cd}s Base CD & {total_ah_s2:.0f} Total AH)*")
+st.markdown(f"**S1 In-Game CD / Recharge:** `{s1_cd:.2f}s` *(Using {s1_base_cd}s Base & {total_ah_s1:.0f} Total AH)*")
+st.markdown(f"**S2 In-Game CD / Recharge:** `{s2_cd:.2f}s` *(Using {s2_base_cd}s Base & {total_ah_s2:.0f} Total AH)*")
 
 st.subheader("Current AH Test:")
 
