@@ -3,49 +3,52 @@ import requests
 
 st.set_page_config(page_title="Archmage 0-CD Tester", layout="wide")
 
-# --- DATA FETCHING (RIOT DATA DRAGON) ---
-@st.cache_data(ttl=86400) 
-def get_latest_version():
-    res = requests.get("https://ddragon.leagueoflegends.com/api/versions.json")
-    return res.json()[0] if res.status_code == 200 else "13.24.1"
-
+# --- DATA FETCHING (DDRAGON FOR NAMES, CDRAGON FOR STATS) ---
 @st.cache_data(ttl=86400)
-def get_champion_list(version):
-    res = requests.get(f"https://ddragon.leagueoflegends.com/cdn/{version}/data/en_US/champion.json")
+def get_champion_directory():
+    """Uses DDragon just to map Champion Names to their numeric IDs."""
+    res = requests.get("https://ddragon.leagueoflegends.com/cdn/13.24.1/data/en_US/champion.json")
     if res.status_code == 200:
-        return list(res.json()['data'].keys())
-    return []
-
-@st.cache_data(ttl=86400)
-def get_champion_spells(version, champ_name):
-    res = requests.get(f"https://ddragon.leagueoflegends.com/cdn/{version}/data/en_US/champion/{champ_name}.json")
-    if res.status_code == 200:
-        champ_data = res.json()['data'][champ_name]
-        # Map Q, W, E, R to the spells
-        spells = champ_data['spells']
-        spell_mapping = {
-            "Q": spells[0],
-            "W": spells[1],
-            "E": spells[2],
-            "R": spells[3]
-        }
-        return spell_mapping
+        champ_dict = {}
+        for champ_data in res.json()['data'].values():
+            champ_dict[champ_data['name']] = champ_data['key'] # Name -> ID (e.g., "Gangplank" -> "41")
+        return champ_dict
     return {}
 
-version = get_latest_version()
-champions = get_champion_list(version)
+@st.cache_data(ttl=86400)
+def get_cdragon_spells(champ_id):
+    """Fetches the raw game engine stats from Community Dragon."""
+    res = requests.get(f"https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/v1/champions/{champ_id}.json")
+    if res.status_code == 200:
+        data = res.json()
+        # CDragon usually stores Q, W, E, R in the first 4 slots of the 'spells' array
+        spells = data.get('spells', [])
+        if len(spells) >= 4:
+            return {
+                "Q": spells[0],
+                "W": spells[1],
+                "E": spells[2],
+                "R": spells[3]
+            }
+    return {}
+
+champ_directory = get_champion_directory()
+champions = sorted(list(champ_directory.keys()))
 
 st.title("Archmage 0-CD Alternating Tester")
-st.markdown(f"*Using live data from LoL Patch {version}*")
+st.markdown("*Pulling live engine data via Community Dragon*")
 
 # --- GLOBAL CHAMPION SELECTION ---
 st.subheader("Champion Selection")
 selected_champ = st.selectbox("Select Champion", options=champions)
-champ_spells = get_champion_spells(version, selected_champ)
+
+# Get the numeric ID to query CDragon
+champ_id = champ_directory.get(selected_champ)
+champ_spells = get_cdragon_spells(champ_id)
 
 st.divider()
 
-# --- UI LAYOUT ---
+# --- UI LAYOUT & CDRAGON PARSER ---
 col1, col2 = st.columns(2)
 
 def spell_selection_ui(col, spell_id, spells):
@@ -54,26 +57,50 @@ def spell_selection_ui(col, spell_id, spells):
         
         if spells:
             spell_key = st.selectbox(f"Select Skill {spell_id}", options=["Q", "W", "E", "R"], key=f"skill_key_{spell_id}")
-            selected_spell = spells[spell_key]
-            st.markdown(f"**{selected_spell['name']}**")
+            selected_spell = spells.get(spell_key, {})
+            st.markdown(f"**{selected_spell.get('name', 'Unknown Spell')}**")
             
-            # Allow user to select the rank of the spell to get the correct base CD
-            rank_index = st.slider(f"Skill Rank", min_value=1, max_value=len(selected_spell['cooldown']), value=1, key=f"rank_{spell_id}") - 1
-            fetched_cd = selected_spell['cooldown'][rank_index]
+            # --- CDRAGON PARSING LOGIC ---
+            # Check if CDragon explicitly lists an "ammo" block for this spell
+            ammo_data = selected_spell.get('ammo', {})
+            has_charges = ammo_data is not None and 'ammoRechargeTime' in ammo_data and len(ammo_data['ammoRechargeTime']) > 0
+            
+            if has_charges:
+                cd_array = ammo_data['ammoRechargeTime']
+                max_charges_array = ammo_data.get('maxAmmo', [1])
+                st.success("✅ Charge-based spell automatically detected via CDragon.")
+            else:
+                cd_array = selected_spell.get('cooldownCoefficients', [10.0])
+                max_charges_array = [1]
+            
+            # Allow user to select the rank of the spell
+            # Filter out any 0s from the array (CDragon sometimes pads arrays to 6 levels)
+            valid_ranks = [cd for cd in cd_array if cd > 0]
+            if not valid_ranks:
+                valid_ranks = [10.0] # Fallback
+                
+            rank_index = st.slider(f"Skill Rank", min_value=1, max_value=len(valid_ranks), value=1, key=f"rank_{spell_id}") - 1
+            
+            # Extract the correct Base CD / Recharge Time
+            base_cd = float(valid_ranks[rank_index])
+            
+            # Extract the correct number of charges for that rank (if applicable)
+            valid_max_charges = [c for c in max_charges_array if c > 0]
+            if not valid_max_charges:
+                valid_max_charges = [1]
+            charge_rank_index = min(rank_index, len(valid_max_charges) - 1)
+            num_charges = int(valid_max_charges[charge_rank_index])
+            
+            st.info(f"**{'Base Recharge Time' if has_charges else 'Base CD'}:** {base_cd}s")
+            if has_charges:
+                st.info(f"**Max Charges Available:** {num_charges}")
+                
         else:
-            fetched_cd = 10.0
-            st.error("Failed to load champion data.")
+            base_cd = 10.0
+            num_charges = 1
+            st.error("Failed to load CDragon data.")
 
-        # Allow manual override for Edge Cases
         st.markdown("---")
-        has_charges = st.checkbox(f"Uses Charges / Ammo?", key=f"charges_{spell_id}")
-        
-        num_charges = 1
-        if has_charges:
-            st.info("For charge-based spells, Archmage uses the Ammo Recharge Time as the Base CD.")
-            num_charges = st.number_input(f"Number of Charges", min_value=1, max_value=10, value=1, step=1, key=f"num_charges_{spell_id}")
-            
-        base_cd = st.number_input(f"Base CD / Recharge Time (s)", min_value=0.0, max_value=200.0, value=float(fetched_cd), step=0.5, key=f"cd_{spell_id}")
         spec_ah = st.number_input(f"Specific AH", min_value=0.0, max_value=200.0, value=0.0, step=1.0, key=f"ah_{spell_id}")
         
         return base_cd, spec_ah, num_charges
@@ -90,11 +117,9 @@ purist = st.checkbox("Purist-Caster (10% Total CD Reduction)")
 
 # --- CORE MATH LOGIC ---
 
-# Base refund per single cast
 s1_refund_per_cast = s1_base_cd * 0.30
 s2_refund_per_cast = s2_base_cd * 0.30
 
-# Total refund if all available charges are expended
 s1_total_refund = s1_charges * s1_refund_per_cast
 s2_total_refund = s2_charges * s2_refund_per_cast
 
@@ -106,13 +131,11 @@ total_ah_s2 = gen_ah + s2_spec_ah
 s1_cd = s1_base_cd * (100 / (100 + total_ah_s1)) * cd_modifier
 s2_cd = s2_base_cd * (100 / (100 + total_ah_s2)) * cd_modifier
 
-# Calculate how many charges of a spell are generated by the other spell's total refund
 s1_charges_generated = s2_total_refund / s1_cd if s1_cd > 0 else float('inf')
 s2_charges_generated = s1_total_refund / s2_cd if s2_cd > 0 else float('inf')
 
 ah_mult = 90 if purist else 100
 
-# Calculate required AH based on the TOTAL refund available from the opposing spell
 s1_req_total_ah = (ah_mult * s1_base_cd / s2_total_refund) - 100 if s2_total_refund > 0 else float('inf')
 s2_req_total_ah = (ah_mult * s2_base_cd / s1_total_refund) - 100 if s1_total_refund > 0 else float('inf')
 
